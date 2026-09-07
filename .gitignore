@@ -1,7 +1,23 @@
-```gitignore
+# Operating system metadata
 .DS_Store
 Thumbs.db
-*.log
+ehthumbs.db
+Desktop.ini
+
+# Editor & IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node / runtime logs
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ketcher local standalone builds & archives
+# (Ignored so GitHub Action handles downloading it, preventing large repo bloat)
 ketcher/
 ketcher.zip
+ketcher_tmp/
