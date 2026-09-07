@@ -225,69 +225,139 @@
       }, 150);
     });
 
-    // Reliably extracts and tightly crops the actual drawn chemistry canvas
+    // Locates the actual drawing SVG while completely ignoring toolbar buttons
+    function findCanvasSvg(frameDoc, ketcher) {
+      // 1. Check Ketcher's direct Raphael canvas handle
+      if (ketcher?.editor?.render?.paper?.canvas) {
+        return ketcher.editor.render.paper.canvas;
+      }
+
+      // 2. Query typical canvas container selectors
+      const direct = frameDoc.querySelector('#canvas svg') ||
+                     frameDoc.querySelector('svg#canvas') ||
+                     frameDoc.querySelector('.canvas-container svg') ||
+                     frameDoc.querySelector('#canvas-container svg');
+      if (direct) return direct;
+
+      // 3. Filter all SVGs that are NOT inside buttons, headers, or toolbars
+      const allSvgs = Array.from(frameDoc.querySelectorAll('svg'));
+      const drawingSvgs = allSvgs.filter(s => {
+        return !s.closest('button') &&
+               !s.closest('[role="button"]') &&
+               !s.closest('.toolbar') &&
+               !s.closest('header') &&
+               !s.closest('nav') &&
+               !s.closest('.MuiButtonBase-root');
+      });
+
+      if (drawingSvgs.length > 0) {
+        return drawingSvgs[0];
+      }
+
+      throw new Error("Could not find Ketcher drawing canvas.");
+    }
+
+    // Reliably extracts and crops the chemical scheme
     async function getSchemeSVGElement() {
+      const ketcher = getKetcher();
       const frameDoc = frame.contentDocument || frame.contentWindow.document;
       if (!frameDoc) throw new Error("Cannot access Ketcher frame.");
 
-      // 1. Find the main drawing canvas SVG (ignore small toolbar icon SVGs)
-      const allSvgs = Array.from(frameDoc.querySelectorAll('svg'));
-      if (allSvgs.length === 0) throw new Error("No SVG canvas found inside Ketcher.");
-
-      // The chemistry canvas contains numerous structural elements (bonds, atoms, arrows)
-      let canvasSvg = allSvgs.find(svg => svg.querySelectorAll('g, path, text, line').length > 15);
-
-      // Fallback: choose the SVG taking up the largest screen area
-      if (!canvasSvg) {
-        canvasSvg = allSvgs.reduce((prev, curr) => {
-          const p = prev.getBoundingClientRect();
-          const c = curr.getBoundingClientRect();
-          return (c.width * c.height > p.width * p.height) ? curr : prev;
-        }, allSvgs[0]);
+      // 1. Verify that content exists using Ketcher's data model
+      let hasData = false;
+      try {
+        const ketStr = await ketcher.getKet();
+        const ketObj = JSON.parse(ketStr);
+        if (ketObj.root && Array.isArray(ketObj.root.nodes) && ketObj.root.nodes.length > 0) {
+          hasData = true;
+        }
+      } catch (_) {
+        try {
+          const mol = await ketcher.getMolfile();
+          if (mol && mol.trim().length > 50 && !mol.includes("  0  0  0  0  0  0  0  0  0  0999 V2000")) {
+            hasData = true;
+          }
+        } catch (__) {}
       }
 
-      // 2. Compute the exact bounding box around the drawn molecules
-      const elements = canvasSvg.querySelectorAll('path, text, line, rect, circle, polygon');
+      const canvasSvg = findCanvasSvg(frameDoc, ketcher);
+
+      // 2. Measure bounds of all drawn paths, lines, and text labels
+      const elements = canvasSvg.querySelectorAll('path, text, line, polygon, circle');
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      let count = 0;
 
       elements.forEach(el => {
+        if (el.closest('defs') || el.closest('clipPath')) return;
+
         try {
           const b = el.getBBox();
-          if (b.width > 0 || b.height > 0) {
+          if (b && (b.width > 0 || b.height > 0)) {
+            if (b.width > 3000 || b.height > 3000) return; // Skip full background layers
             minX = Math.min(minX, b.x);
             minY = Math.min(minY, b.y);
             maxX = Math.max(maxX, b.x + b.width);
             maxY = Math.max(maxY, b.y + b.height);
+            count++;
           }
-        } catch (_) {}
+        } catch (_) {
+          try {
+            const r = el.getBoundingClientRect();
+            const svgR = canvasSvg.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+              const x = r.left - svgR.left;
+              const y = r.top - svgR.top;
+              minX = Math.min(minX, x);
+              minY = Math.min(minY, y);
+              maxX = Math.max(maxX, x + r.width);
+              maxY = Math.max(maxY, y + r.height);
+              count++;
+            }
+          } catch (__) {}
+        }
       });
 
-      if (minX === Infinity || maxX === -Infinity) {
+      // Abort only if Ketcher data is completely empty and no elements were found
+      if (!hasData && count === 0) {
         throw new Error("Canvas is empty. Draw a chemical structure or reaction scheme first.");
       }
 
-      // 3. Add padding around the scheme
-      const padding = 24;
+      // Fallback bounding coordinates if measurements could not be resolved
+      if (minX === Infinity || maxX === -Infinity) {
+        const svgRect = canvasSvg.getBoundingClientRect();
+        minX = 0;
+        minY = 0;
+        maxX = svgRect.width || 800;
+        maxY = svgRect.height || 500;
+      }
+
+      // Add comfortable padding
+      const padding = 28;
       const cropX = minX - padding;
       const cropY = minY - padding;
-      const cropW = (maxX - minX) + (padding * 2);
-      const cropH = (maxY - minY) + (padding * 2);
+      const cropW = Math.max(100, (maxX - minX) + (padding * 2));
+      const cropH = Math.max(60, (maxY - minY) + (padding * 2));
 
-      // 4. Clone and set cropped viewBox
+      // Clone and adjust viewBox
       const clonedSvg = canvasSvg.cloneNode(true);
+      clonedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
       clonedSvg.setAttribute('viewBox', `${cropX} ${cropY} ${cropW} ${cropH}`);
       clonedSvg.setAttribute('width', cropW);
       clonedSvg.setAttribute('height', cropH);
 
-      // 5. Inline Ketcher styles so bond lines, colors, and atom fonts render in the PDF
-      const internalStyles = Array.from(frameDoc.querySelectorAll('style'))
-        .map(s => s.innerHTML)
-        .join('\n');
+      // Inject white background rectangle so PDF export doesn't render dark or transparent
+      const bgRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      bgRect.setAttribute('x', cropX);
+      bgRect.setAttribute('y', cropY);
+      bgRect.setAttribute('width', cropW);
+      bgRect.setAttribute('height', cropH);
+      bgRect.setAttribute('fill', '#ffffff');
+      clonedSvg.insertBefore(bgRect, clonedSvg.firstChild);
 
+      // Inline styles for font consistency
       const styleElement = document.createElementNS('http://www.w3.org/2000/svg', 'style');
       styleElement.innerHTML = `
-        text { font-family: Arial, Helvetica, sans-serif; }
-        ${internalStyles}
+        text { font-family: Arial, Helvetica, sans-serif !important; }
       `;
       clonedSvg.insertBefore(styleElement, clonedSvg.firstChild);
 
@@ -319,12 +389,12 @@
         doc.setTextColor(15, 23, 42);
         doc.text(titleText, margin, margin + 8);
 
-        // Divider rule
+        // Divider line
         doc.setDrawColor(203, 213, 225);
         doc.setLineWidth(1);
         doc.line(margin, margin + 18, pageWidth - margin, margin + 18);
 
-        // Printable area
+        // Printable boundaries
         const contentTop = margin + 30;
         const maxW = pageWidth - (margin * 2);
         const maxH = pageHeight - contentTop - margin;
@@ -333,7 +403,7 @@
         const drawW = origW * scale;
         const drawH = origH * scale;
 
-        // Center on the page
+        // Center on page
         const posX = margin + (maxW - drawW) / 2;
         const posY = contentTop + (maxH - drawH) / 2;
 
@@ -344,7 +414,7 @@
           height: drawH
         });
 
-        // Footer timestamp
+        // Timestamp
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(8);
         doc.setTextColor(148, 163, 184);
@@ -358,7 +428,7 @@
       }
     }
 
-    // Export Scheme to SVG
+    // Export Scheme to Raw SVG
     async function exportSVG() {
       try {
         const titleText = document.getElementById('scheme-title').value.trim() || 'Synthetic Scheme';
