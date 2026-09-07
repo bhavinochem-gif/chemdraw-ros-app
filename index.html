@@ -189,24 +189,18 @@
       return k;
     }
 
-    // Apply ACS 1996 Style Settings directly to Ketcher engine
     function applyAcsSettings(ketcher) {
       if (!ketcher || typeof ketcher.setSettings !== 'function') return;
 
       ketcher.setSettings({
-        // ACS 1996 Bond Proportions
-        bondLength: 38.4,              // 14.4 pt screen scale
-        bondSpacing: 0.18,             // 18% bond spacing
-        bondLineWidth: 1.0,            // 0.6 pt line width
-        stereoBondWidth: 2.6,          // 2.0 pt wedge width
-        hashSpacing: 2.7,              // 2.5 pt hash spacing
-
-        // ACS Typography
+        bondLength: 38.4,
+        bondSpacing: 0.18,
+        bondLineWidth: 1.0,
+        stereoBondWidth: 2.6,
+        hashSpacing: 2.7,
         font: 'Arial, Helvetica, sans-serif',
-        fontSize: 10,                  // 10 pt atom labels
-        fontSizeSub: 8,                // 8 pt subscript
-        
-        // Display Preferences
+        fontSize: 10,
+        fontSizeSub: 8,
         atomColoring: true,
         showImplicitHydrogens: false
       });
@@ -221,7 +215,6 @@
       }
     }
 
-    // Hook settings after iframe finishes loading
     frame.addEventListener('load', () => {
       const checkTimer = setInterval(() => {
         const k = frame.contentWindow?.ketcher;
@@ -232,26 +225,73 @@
       }, 150);
     });
 
-    // Extract chemical drawing as vector SVG
+    // Reliably extracts and tightly crops the actual drawn chemistry canvas
     async function getSchemeSVGElement() {
-      const ketcher = getKetcher();
+      const frameDoc = frame.contentDocument || frame.contentWindow.document;
+      if (!frameDoc) throw new Error("Cannot access Ketcher frame.");
 
-      try {
-        const struct = await ketcher.getKet();
-        const blob = await ketcher.generateImage(struct, { outputFormat: 'svg', backgroundColor: '#FFFFFF' });
-        const svgString = await blob.text();
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(svgString, 'image/svg+xml');
-        const svgEl = doc.documentElement;
-        if (svgEl && svgEl.tagName.toLowerCase() === 'svg') return svgEl;
-      } catch (e) {
-        console.warn("Ketcher generateImage fallback engaged:", e);
+      // 1. Find the main drawing canvas SVG (ignore small toolbar icon SVGs)
+      const allSvgs = Array.from(frameDoc.querySelectorAll('svg'));
+      if (allSvgs.length === 0) throw new Error("No SVG canvas found inside Ketcher.");
+
+      // The chemistry canvas contains numerous structural elements (bonds, atoms, arrows)
+      let canvasSvg = allSvgs.find(svg => svg.querySelectorAll('g, path, text, line').length > 15);
+
+      // Fallback: choose the SVG taking up the largest screen area
+      if (!canvasSvg) {
+        canvasSvg = allSvgs.reduce((prev, curr) => {
+          const p = prev.getBoundingClientRect();
+          const c = curr.getBoundingClientRect();
+          return (c.width * c.height > p.width * p.height) ? curr : prev;
+        }, allSvgs[0]);
       }
 
-      const frameDoc = frame.contentDocument || frame.contentWindow.document;
-      const frameSvg = frameDoc?.querySelector('#canvas') || frameDoc?.querySelector('svg');
-      if (!frameSvg) throw new Error("No chemical drawing detected on canvas.");
-      return frameSvg.cloneNode(true);
+      // 2. Compute the exact bounding box around the drawn molecules
+      const elements = canvasSvg.querySelectorAll('path, text, line, rect, circle, polygon');
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+      elements.forEach(el => {
+        try {
+          const b = el.getBBox();
+          if (b.width > 0 || b.height > 0) {
+            minX = Math.min(minX, b.x);
+            minY = Math.min(minY, b.y);
+            maxX = Math.max(maxX, b.x + b.width);
+            maxY = Math.max(maxY, b.y + b.height);
+          }
+        } catch (_) {}
+      });
+
+      if (minX === Infinity || maxX === -Infinity) {
+        throw new Error("Canvas is empty. Draw a chemical structure or reaction scheme first.");
+      }
+
+      // 3. Add padding around the scheme
+      const padding = 24;
+      const cropX = minX - padding;
+      const cropY = minY - padding;
+      const cropW = (maxX - minX) + (padding * 2);
+      const cropH = (maxY - minY) + (padding * 2);
+
+      // 4. Clone and set cropped viewBox
+      const clonedSvg = canvasSvg.cloneNode(true);
+      clonedSvg.setAttribute('viewBox', `${cropX} ${cropY} ${cropW} ${cropH}`);
+      clonedSvg.setAttribute('width', cropW);
+      clonedSvg.setAttribute('height', cropH);
+
+      // 5. Inline Ketcher styles so bond lines, colors, and atom fonts render in the PDF
+      const internalStyles = Array.from(frameDoc.querySelectorAll('style'))
+        .map(s => s.innerHTML)
+        .join('\n');
+
+      const styleElement = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+      styleElement.innerHTML = `
+        text { font-family: Arial, Helvetica, sans-serif; }
+        ${internalStyles}
+      `;
+      clonedSvg.insertBefore(styleElement, clonedSvg.firstChild);
+
+      return { svgElement: clonedSvg, width: cropW, height: cropH };
     }
 
     // Export Scheme to Vector A4 PDF
@@ -260,7 +300,7 @@
         notify("Generating vector PDF...");
         const titleText = document.getElementById('scheme-title').value.trim() || 'Synthetic Scheme';
         const orientation = document.getElementById('page-orientation').value;
-        const svgElement = await getSchemeSVGElement();
+        const { svgElement, width: origW, height: origH } = await getSchemeSVGElement();
 
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF({
@@ -271,36 +311,32 @@
 
         const pageWidth = doc.internal.pageSize.getWidth();
         const pageHeight = doc.internal.pageSize.getHeight();
-        const margin = 36; // 0.5 in padding
+        const margin = 36; // 0.5 in margins
 
-        // Title
+        // Header Title
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(13);
         doc.setTextColor(15, 23, 42);
         doc.text(titleText, margin, margin + 8);
 
-        // Divider
+        // Divider rule
         doc.setDrawColor(203, 213, 225);
         doc.setLineWidth(1);
         doc.line(margin, margin + 18, pageWidth - margin, margin + 18);
 
-        // Printable bounds
+        // Printable area
         const contentTop = margin + 30;
         const maxW = pageWidth - (margin * 2);
         const maxH = pageHeight - contentTop - margin;
-
-        const viewBox = svgElement.viewBox?.baseVal;
-        const origW = viewBox?.width || parseFloat(svgElement.getAttribute('width')) || 800;
-        const origH = viewBox?.height || parseFloat(svgElement.getAttribute('height')) || 400;
 
         const scale = Math.min(maxW / origW, maxH / origH, 1.0);
         const drawW = origW * scale;
         const drawH = origH * scale;
 
+        // Center on the page
         const posX = margin + (maxW - drawW) / 2;
         const posY = contentTop + (maxH - drawH) / 2;
 
-        // Render scalable vector elements
         await doc.svg(svgElement, {
           x: posX,
           y: posY,
@@ -308,7 +344,7 @@
           height: drawH
         });
 
-        // Footer
+        // Footer timestamp
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(8);
         doc.setTextColor(148, 163, 184);
@@ -322,11 +358,11 @@
       }
     }
 
-    // Export Scheme to Raw SVG
+    // Export Scheme to SVG
     async function exportSVG() {
       try {
         const titleText = document.getElementById('scheme-title').value.trim() || 'Synthetic Scheme';
-        const svgElement = await getSchemeSVGElement();
+        const { svgElement } = await getSchemeSVGElement();
         const serializer = new XMLSerializer();
         const svgString = serializer.serializeToString(svgElement);
         const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
