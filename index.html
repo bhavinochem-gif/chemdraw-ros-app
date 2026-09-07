@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synthetic Route (ROS) Sketcher & PDF Exporter</title>
+
+  <!-- Vector PDF Generation Libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/svg2pdf.js@2.2.4/dist/svg2pdf.umd.min.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      background: #f8fafc;
+      overflow: hidden;
+    }
+
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 18px;
+      background: #ffffff;
+      border-bottom: 1px solid #cbd5e1;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      z-index: 10;
+    }
+
+    .meta-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-grow: 1;
+      max-width: 720px;
+    }
+
+    .meta-group input {
+      flex: 1;
+      padding: 8px 12px;
+      font-size: 13px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .meta-group input:focus {
+      border-color: #2563eb;
+    }
+
+    .meta-group select {
+      padding: 8px 12px;
+      font-size: 13px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: #ffffff;
+      cursor: pointer;
+    }
+
+    .action-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    button {
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease-in-out;
+    }
+
+    .btn-pdf {
+      background: #2563eb;
+      color: #ffffff;
+    }
+
+    .btn-pdf:hover {
+      background: #1d4ed8;
+    }
+
+    .btn-svg {
+      background: #f1f5f9;
+      color: #334155;
+      border-color: #cbd5e1;
+    }
+
+    .btn-svg:hover {
+      background: #e2e8f0;
+    }
+
+    .btn-acs {
+      background: #f8fafc;
+      color: #475569;
+      border-color: #cbd5e1;
+      font-size: 12px;
+    }
+
+    .btn-acs:hover {
+      background: #f1f5f9;
+      color: #0f172a;
+    }
+
+    #frame-container {
+      flex: 1;
+      width: 100%;
+      height: calc(100vh - 60px);
+      position: relative;
+    }
+
+    #ketcher-frame {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e293b;
+      color: #ffffff;
+      padding: 9px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      z-index: 1000;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="meta-group">
+      <input type="text" id="scheme-title" placeholder="Scheme Title" value="Scheme 1: Total Synthesis Route">
+      <select id="page-orientation">
+        <option value="landscape" selected>Landscape (Multi-step ROS)</option>
+        <option value="portrait">Portrait</option>
+      </select>
+      <button class="btn-acs" onclick="triggerAcsPreset()" title="Reapply standard ACS 1996 drawing rules">Reset ACS Style</button>
+    </div>
+
+    <div class="action-group">
+      <button class="btn-svg" onclick="exportSVG()">Download SVG</button>
+      <button class="btn-pdf" onclick="exportPDF()">📄 Export Vector PDF</button>
+    </div>
+  </header>
+
+  <div id="frame-container">
+    <iframe id="ketcher-frame" src="./ketcher/index.html"></iframe>
+  </div>
+
+  <div id="toast">Ready</div>
+
+  <script>
+    const frame = document.getElementById('ketcher-frame');
+
+    function notify(text, ms = 2500) {
+      const el = document.getElementById('toast');
+      el.innerText = text;
+      el.style.opacity = '1';
+      setTimeout(() => { el.style.opacity = '0'; }, ms);
+    }
+
+    function getKetcher() {
+      const k = frame?.contentWindow?.ketcher;
+      if (!k) throw new Error("Ketcher instance is still initializing.");
+      return k;
+    }
+
+    // Apply ACS 1996 Style Settings directly to Ketcher engine
+    function applyAcsSettings(ketcher) {
+      if (!ketcher || typeof ketcher.setSettings !== 'function') return;
+
+      ketcher.setSettings({
+        // ACS 1996 Bond Proportions
+        bondLength: 38.4,              // 14.4 pt screen scale
+        bondSpacing: 0.18,             // 18% bond spacing
+        bondLineWidth: 1.0,            // 0.6 pt line width
+        stereoBondWidth: 2.6,          // 2.0 pt wedge width
+        hashSpacing: 2.7,              // 2.5 pt hash spacing
+
+        // ACS Typography
+        font: 'Arial, Helvetica, sans-serif',
+        fontSize: 10,                  // 10 pt atom labels
+        fontSizeSub: 8,                // 8 pt subscript
+        
+        // Display Preferences
+        atomColoring: true,
+        showImplicitHydrogens: false
+      });
+      notify("ACS 1996 style preset loaded");
+    }
+
+    function triggerAcsPreset() {
+      try {
+        applyAcsSettings(getKetcher());
+      } catch (err) {
+        notify("Could not apply style: " + err.message);
+      }
+    }
+
+    // Hook settings after iframe finishes loading
+    frame.addEventListener('load', () => {
+      const checkTimer = setInterval(() => {
+        const k = frame.contentWindow?.ketcher;
+        if (k && typeof k.setSettings === 'function') {
+          clearInterval(checkTimer);
+          applyAcsSettings(k);
+        }
+      }, 150);
+    });
+
+    // Extract chemical drawing as vector SVG
+    async function getSchemeSVGElement() {
+      const ketcher = getKetcher();
+
+      try {
+        const struct = await ketcher.getKet();
+        const blob = await ketcher.generateImage(struct, { outputFormat: 'svg', backgroundColor: '#FFFFFF' });
+        const svgString = await blob.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(svgString, 'image/svg+xml');
+        const svgEl = doc.documentElement;
+        if (svgEl && svgEl.tagName.toLowerCase() === 'svg') return svgEl;
+      } catch (e) {
+        console.warn("Ketcher generateImage fallback engaged:", e);
+      }
+
+      const frameDoc = frame.contentDocument || frame.contentWindow.document;
+      const frameSvg = frameDoc?.querySelector('#canvas') || frameDoc?.querySelector('svg');
+      if (!frameSvg) throw new Error("No chemical drawing detected on canvas.");
+      return frameSvg.cloneNode(true);
+    }
+
+    // Export Scheme to Vector A4 PDF
+    async function exportPDF() {
+      try {
+        notify("Generating vector PDF...");
+        const titleText = document.getElementById('scheme-title').value.trim() || 'Synthetic Scheme';
+        const orientation = document.getElementById('page-orientation').value;
+        const svgElement = await getSchemeSVGElement();
+
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({
+          orientation: orientation,
+          unit: 'pt',
+          format: 'a4'
+        });
+
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const margin = 36; // 0.5 in padding
+
+        // Title
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.setTextColor(15, 23, 42);
+        doc.text(titleText, margin, margin + 8);
+
+        // Divider
+        doc.setDrawColor(203, 213, 225);
+        doc.setLineWidth(1);
+        doc.line(margin, margin + 18, pageWidth - margin, margin + 18);
+
+        // Printable bounds
+        const contentTop = margin + 30;
+        const maxW = pageWidth - (margin * 2);
+        const maxH = pageHeight - contentTop - margin;
+
+        const viewBox = svgElement.viewBox?.baseVal;
+        const origW = viewBox?.width || parseFloat(svgElement.getAttribute('width')) || 800;
+        const origH = viewBox?.height || parseFloat(svgElement.getAttribute('height')) || 400;
+
+        const scale = Math.min(maxW / origW, maxH / origH, 1.0);
+        const drawW = origW * scale;
+        const drawH = origH * scale;
+
+        const posX = margin + (maxW - drawW) / 2;
+        const posY = contentTop + (maxH - drawH) / 2;
+
+        // Render scalable vector elements
+        await doc.svg(svgElement, {
+          x: posX,
+          y: posY,
+          width: drawW,
+          height: drawH
+        });
+
+        // Footer
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.setTextColor(148, 163, 184);
+        doc.text(`Generated: ${new Date().toLocaleDateString()}`, margin, pageHeight - 16);
+
+        const filename = titleText.replace(/[^a-zA-Z0-9_-]/g, '_') + '.pdf';
+        doc.save(filename);
+        notify("Vector PDF downloaded");
+      } catch (err) {
+        alert("PDF export failed: " + err.message);
+      }
+    }
+
+    // Export Scheme to Raw SVG
+    async function exportSVG() {
+      try {
+        const titleText = document.getElementById('scheme-title').value.trim() || 'Synthetic Scheme';
+        const svgElement = await getSchemeSVGElement();
+        const serializer = new XMLSerializer();
+        const svgString = serializer.serializeToString(svgElement);
+        const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = titleText.replace(/[^a-zA-Z0-9_-]/g, '_') + '.svg';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        notify("Vector SVG downloaded");
+      } catch (err) {
+        alert("SVG export failed: " + err.message);
+      }
+    }
+  </script>
+</body>
+</html>
