@@ -1,0 +1,66 @@
+name: Deploy ROS App to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Fetch and Unpack Ketcher Standalone
+        run: |
+          echo "Downloading latest Ketcher standalone..."
+          # Fetch download URL for latest ketcher-standalone release
+          DOWNLOAD_URL=$(curl -s https://api.github.com/repos/epam/ketcher/releases/latest \
+            | grep "browser_download_url.*ketcher-standalone.*\.zip" \
+            | head -n 1 \
+            | cut -d '"' -f 4)
+          
+          # Fallback to stable release if API rate limit is reached
+          if [ -z "$DOWNLOAD_URL" ]; then
+            DOWNLOAD_URL="https://github.com/epam/ketcher/releases/download/v2.26.0/ketcher-standalone-v2.26.0.zip"
+          fi
+          
+          curl -L -o ketcher.zip "$DOWNLOAD_URL"
+          mkdir -p ketcher
+          unzip -q ketcher.zip -d ketcher_tmp
+          
+          # Handle nested zip folder variations
+          if [ -d ketcher_tmp/ketcher ]; then
+            mv ketcher_tmp/ketcher/* ketcher/
+          else
+            mv ketcher_tmp/* ketcher/
+          fi
+          
+          rm -rf ketcher_tmp ketcher.zip
+          echo "Ketcher standalone installed to ./ketcher"
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
